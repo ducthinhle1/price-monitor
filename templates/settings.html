@@ -1,0 +1,182 @@
+{% extends "base.html" %}
+{% block title %}Settings — Price Monitor{% endblock %}
+
+{% set active_page = 'settings' %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1 class="page-title">Settings</h1>
+    <p class="page-sub">How we scrape, when we scrape, and where we ping you.</p>
+  </div>
+</div>
+
+<form method="post" action="/settings" id="settings-form">
+
+<div class="settings-grid">
+
+  <!-- ─── Schedule ──────────────────────────────────────── -->
+  <div class="setting-side">
+    <h3>Schedule</h3>
+    <p>Runs once a day at the hour you pick. Pick something quiet — like before you wake up.</p>
+  </div>
+  <div>
+    <div class="card setting-card">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">
+        <div>
+          <div style="font-size:14px;font-weight:600">Daily check hour</div>
+          <div style="font-size:12px;color:var(--ink-3);margin-top:2px">
+            New York time (ET) · currently
+            <b style="color:var(--ink)" id="hour-display">{{ check_hour | int | string | zfill(2) }}:00 ET</b>
+          </div>
+        </div>
+        <span style="display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--drop);font-weight:600">
+          {{ icon('clock', 11, 2.4) }} active
+        </span>
+      </div>
+      <input type="hidden" name="check_hour" id="check_hour_input" value="{{ check_hour }}" />
+      <div class="hour-grid" id="hour-grid">
+        {% set now_utc = now_hour %}
+        {% for h in range(24) %}
+        <button
+          type="button"
+          class="{{ 'active' if h == check_hour | int else '' }} {{ 'now' if h == now_hour else '' }}"
+          data-hour="{{ h }}"
+          onclick="selectHour({{ h }}, this)"
+        >{{ '%02d' | format(h) }}</button>
+        {% endfor %}
+      </div>
+      <div style="font-size:11px;color:var(--ink-4);margin-top:8px;font-family:var(--font-mono)">
+        orange ring = current New York hour
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── Discord ───────────────────────────────────────── -->
+  <div class="setting-side">
+    <h3>Discord</h3>
+    <p>Post a rich embed to a channel whenever a price hits your target.</p>
+  </div>
+  <div>
+    <div class="card setting-card">
+      <div class="field">
+        <label>Webhook URL</label>
+        <div class="secret-row">
+          <input class="input mono" type="password" name="discord_webhook" id="discord-webhook"
+            value="{{ discord_webhook }}" placeholder="https://discord.com/api/webhooks/…" />
+          <button type="button" class="btn btn-sm btn-icon btn-ghost" id="discord-reveal-btn"
+            onclick="toggleReveal('discord-webhook','discord-reveal-btn')" title="Show/hide">
+            {{ icon('eye', 14, 2) }}
+          </button>
+        </div>
+        {% if discord_webhook %}
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px">
+          <span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--drop);font-weight:600">
+            <span style="width:7px;height:7px;border-radius:50%;background:var(--drop)"></span>Webhook saved
+          </span>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── Email ─────────────────────────────────────────── -->
+  <div class="setting-side">
+    <h3>Email</h3>
+    <p>Gmail SMTP with an app password. We never store your main password.</p>
+  </div>
+  <div>
+    <div class="card setting-card">
+      <div class="row-2">
+        <div class="field">
+          <label>Sender Gmail address</label>
+          <input class="input" type="email" name="sender_email"
+            value="{{ sender_email }}" placeholder="you@gmail.com" />
+        </div>
+        <div class="field">
+          <label>Gmail app password</label>
+          <div class="secret-row">
+            <input class="input mono" type="password" name="gmail_password" id="gmail-pw"
+              placeholder="{{ '•••• •••• •••• ••••   (saved)' if gmail_password else 'xxxx xxxx xxxx xxxx' }}"
+              value="{{ gmail_password }}" />
+            <button type="button" class="btn btn-sm btn-ghost"
+              onclick="document.getElementById('gmail-pw').value='';document.getElementById('gmail-pw').placeholder='Enter new password';document.getElementById('gmail-pw').focus()">
+              Replace
+            </button>
+          </div>
+          <div class="hint">16-character app password from <a href="https://myaccount.google.com/apppasswords" target="_blank" style="color:var(--ink-2)">Google account settings</a></div>
+        </div>
+      </div>
+      <div class="field" style="margin-top:10px">
+        <label>Send reports to</label>
+        <input class="input" type="email" name="receiver_email"
+          value="{{ receiver_email }}" placeholder="you@gmail.com" />
+        <div class="hint">Price alert emails will be sent to this address.</div>
+      </div>
+      {% if sender_email and gmail_password %}
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px;padding-top:12px;border-top:1px dashed var(--line)">
+        <span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--drop);font-weight:600">
+          <span style="width:7px;height:7px;border-radius:50%;background:var(--drop)"></span>SMTP credentials saved · smtp.gmail.com:587
+        </span>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- ─── Scraper info ──────────────────────────────────── -->
+  <div class="setting-side">
+    <h3>Scraper</h3>
+    <p>How each store is accessed. Retries and delays are built in.</p>
+  </div>
+  <div>
+    <div class="card setting-card">
+      <div style="display:flex;flex-direction:column;gap:10px">
+        {% for row in [
+          {'store': 'amazon', 'label': 'Amazon', 'method': 'HTML scraping', 'retry': 3, 'delay': '3–7s'},
+          {'store': 'target', 'label': 'Target',  'method': 'Private JSON API', 'retry': 2, 'delay': '0.5s'},
+          {'store': 'ebay',   'label': 'eBay',    'method': 'HTML scraping', 'retry': 3, 'delay': '3–7s'},
+        ] %}
+        <div style="display:flex;align-items:center;gap:14px;padding:8px 10px;background:var(--cream-2);border-radius:10px">
+          {% if row.store == 'amazon' %}<span class="pill pill-amz"><span class="dot"></span>Amazon</span>
+          {% elif row.store == 'target' %}<span class="pill pill-tgt"><span class="dot"></span>Target</span>
+          {% else %}<span class="pill pill-ebay"><span class="dot"></span>eBay</span>{% endif %}
+          <div style="font-size:12.5px;color:var(--ink-3);flex:1">{{ row.method }}</div>
+          <div style="font-family:var(--font-mono);font-size:12px">retry ×{{ row.retry }} · delay {{ row.delay }}</div>
+          <span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--drop);font-weight:600">
+            <span style="width:7px;height:7px;border-radius:50%;background:var(--drop)"></span>ok
+          </span>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Save button -->
+<div style="margin-top:24px;padding-top:20px;border-top:1px solid var(--line);display:flex;justify-content:flex-end">
+  <button type="submit" class="btn btn-primary" style="min-width:140px;justify-content:center">
+    {{ icon('check', 14, 2.4) }}Save settings
+  </button>
+</div>
+
+</form>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function selectHour(h, btn) {
+  document.querySelectorAll('.hour-grid button').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById('check_hour_input').value = h;
+  document.getElementById('hour-display').textContent = String(h).padStart(2,'0') + ':00 ET';
+}
+
+function toggleReveal(inputId, btnId) {
+  const inp = document.getElementById(inputId);
+  inp.type = inp.type === 'password' ? 'text' : 'password';
+}
+
+</script>
+{% endblock %}

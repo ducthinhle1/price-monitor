@@ -1,0 +1,380 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — Price Monitor{% endblock %}
+
+{% set active_page = 'dashboard' %}
+{% set products_count = products | length %}
+
+{% block content %}
+
+{% if products %}
+
+<!-- ─── Page header ───────────────────────────────────────── -->
+<div class="page-head">
+  <div>
+    <h1 class="page-title">Good morning — <em>{{ products | length }} on watch</em></h1>
+    <p class="page-sub">
+      {% if last_run %}Last sweep {{ last_run.strftime('%b %d at %I:%M %p') }}{% else %}No checks run yet{% endif %}
+      · daily check at {{ check_hour }}:00 UTC
+    </p>
+  </div>
+  <div class="head-actions">
+    <form method="post" action="/check" style="display:inline">
+      <button class="btn" {% if checking %}disabled{% endif %}>
+        {% if checking %}
+          <span class="spin" style="width:15px;height:15px;border-color:rgba(26,22,20,0.2);border-top-color:var(--ink)"></span>Checking…
+        {% else %}
+          {{ icon('refresh', 16, 2.2) }}Check now
+        {% endif %}
+      </button>
+    </form>
+    <button class="btn btn-primary" onclick="openAddModal()">{{ icon('plus', 16, 2.4) }}Add product</button>
+  </div>
+</div>
+
+<!-- ─── Check Now banner ──────────────────────────────────── -->
+{% if checking %}
+<div class="check-banner" id="check-banner">
+  <div class="spin"></div>
+  <div style="display:flex;flex-direction:column;gap:2px">
+    <div style="font-size:13.5px;font-weight:600">Checking prices…</div>
+    <div style="font-family:var(--font-mono);font-size:12px;color:rgba(245,239,228,0.8)">This may take a minute — prices refresh in the background</div>
+  </div>
+  <div class="progress"><i></i></div>
+</div>
+{% endif %}
+
+<!-- ─── Stats strip ───────────────────────────────────────── -->
+<div class="stats">
+  <div class="card stat stat-accent">
+    <div class="stat-label">Target hits</div>
+    <div class="stat-value" style="color:var(--hit)">{{ hits_count }}</div>
+    <div class="stat-sub">🎯 prices at your target</div>
+  </div>
+  <div class="card stat">
+    <div class="stat-label">Price drops</div>
+    <div class="stat-value" style="color:var(--drop)">{{ drops_count }}</div>
+    <div class="stat-sub">↓ vs last check</div>
+  </div>
+  <div class="card stat">
+    <div class="stat-label">Tracking</div>
+    <div class="stat-value">{{ products | length }}</div>
+    <div class="stat-sub">across Amazon · Target · eBay</div>
+  </div>
+  <div class="card stat">
+    <div class="stat-label">Last checked</div>
+    <div class="stat-value" style="font-size:24px;padding-top:8px">
+      {% if last_run %}{{ last_run.strftime('%H:%M') }}{% else %}—{% endif %}
+    </div>
+    <div class="stat-sub">{% if last_run %}{{ last_run.strftime('%b %d') }} UTC{% else %}never{% endif %}</div>
+  </div>
+</div>
+
+<!-- ─── Toolbar ───────────────────────────────────────────── -->
+<div class="toolbar">
+  <div class="search">
+    {{ icon('search', 15, 2) }}
+    <input id="search-input" placeholder="Search products…" oninput="filterProducts()" autocomplete="off" />
+  </div>
+  <div class="seg" id="filter-seg" role="tablist">
+    <button class="active" data-filter="all" onclick="setFilter('all',this)">All</button>
+    <button data-filter="hits" onclick="setFilter('hits',this)">🎯 Hits ({{ hits_count }})</button>
+    <button data-filter="dropping" onclick="setFilter('dropping',this)">Dropping</button>
+    <button data-filter="amazon" onclick="setFilter('amazon',this)">Amazon</button>
+    <button data-filter="target" onclick="setFilter('target',this)">Target</button>
+    <button data-filter="ebay" onclick="setFilter('ebay',this)">eBay</button>
+  </div>
+  <div class="spacer"></div>
+  <div class="seg">
+    <button id="layout-cards" class="active" onclick="setLayout('cards')">Cards</button>
+    <button id="layout-table" onclick="setLayout('table')">Table</button>
+  </div>
+</div>
+
+<!-- ─── Product cards ─────────────────────────────────────── -->
+<div class="grid" id="cards-view">
+  {% for p in products %}
+  {% set hit = p.target_price and p.current and p.current <= p.target_price %}
+  {% set dropping = p.current and p.previous and p.current < p.previous %}
+  <article
+    class="card prod"
+    data-name="{{ p.name | lower }}"
+    data-store="{{ p.store }}"
+    data-hit="{{ 'true' if hit else 'false' }}"
+    data-dropping="{{ 'true' if dropping else 'false' }}"
+    onclick="location.href='/products/{{ p.id }}'"
+  >
+    {% if hit %}<div class="ribbon">Target hit</div>{% endif %}
+
+    <div class="prod-head">
+      <div class="prod-thumb">img</div>
+      <div style="flex:1;min-width:0">
+        <div class="prod-title">{{ p.name }}</div>
+        <div class="prod-meta">
+          <!-- store pill -->
+          {% if p.store == 'amazon' %}
+            <span class="pill pill-amz"><span class="dot"></span>Amazon</span>
+          {% elif p.store == 'target' %}
+            <span class="pill pill-tgt"><span class="dot"></span>Target</span>
+          {% elif p.store == 'ebay' %}
+            <span class="pill pill-ebay"><span class="dot"></span>eBay</span>
+          {% else %}
+            <span class="pill"><span class="dot"></span>{{ p.store | title }}</span>
+          {% endif %}
+
+          <!-- change tag -->
+          {% if p.current and p.previous %}
+            {% set pct = ((p.current - p.previous) / p.previous * 100) | round(1) %}
+            {% if p.current < p.previous %}
+              <span class="tag-drop">{{ icon('arrowDown', 11, 2.4) }}{{ (pct | abs) }}%</span>
+            {% elif p.current > p.previous %}
+              <span class="tag-rise">{{ icon('arrowUp', 11, 2.4) }}{{ pct }}%</span>
+            {% else %}
+              <span class="tag-flat">— 0.0%</span>
+            {% endif %}
+          {% elif p.current %}
+            <span class="tag-flat">First check</span>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+
+    <!-- Price -->
+    <div class="prod-price-row">
+      {% if p.current %}
+        <span class="prod-price" style="{{ 'color:var(--hit-2)' if hit else '' }}">
+          {% set parts = ('%.2f' | format(p.current)).split('.') %}
+          ${{ parts[0] }}<span class="cents">.{{ parts[1] }}</span>
+        </span>
+        {% if p.previous and p.previous > p.current %}
+          <span class="prod-was">was ${{ '%.2f' | format(p.previous) }}</span>
+        {% endif %}
+      {% else %}
+        <span style="color:var(--ink-4);font-family:var(--font-mono);font-size:14px">Not checked yet</span>
+      {% endif %}
+    </div>
+
+    <!-- Footer -->
+    <div class="prod-foot">
+      {% if p.target_price %}
+        <div class="prod-target {{ 'hit' if hit else '' }}">
+          {{ icon('target', 12) }}
+          {% if p.target_pct is not none %}
+            <div class="bar"><i style="width:{{ p.target_pct }}%"></i></div>
+          {% else %}
+            <div class="bar"><i style="width:0%"></i></div>
+          {% endif %}
+          <span>${{ '%.2f' | format(p.target_price) }}</span>
+        </div>
+      {% else %}
+        <span style="color:var(--ink-4);font-size:11.5px">No target set</span>
+      {% endif %}
+      <div class="prod-actions" onclick="event.stopPropagation()">
+        <button class="btn btn-ghost btn-sm btn-icon" title="Edit"
+          onclick="openEditModal({{ p.id }}, {{ p.name | tojson }}, {{ p.target_price or '' }}, {{ p.current or '' }}, {{ p.url | tojson }}, '/')">
+          {{ icon('edit', 14, 2) }}
+        </button>
+        <form method="post" action="/products/{{ p.id }}/delete" onsubmit="return confirm('Stop tracking {{ p.name | replace("'","") }}?')">
+          <button class="btn btn-ghost btn-sm btn-icon" title="Remove">{{ icon('trash', 14, 2) }}</button>
+        </form>
+      </div>
+    </div>
+  </article>
+  {% endfor %}
+</div>
+
+<!-- ─── Product table ─────────────────────────────────────── -->
+<div class="hidden" id="table-view">
+  <table class="tbl">
+    <thead>
+      <tr>
+        <th>Product</th>
+        <th>Store</th>
+        <th class="num">Current</th>
+        <th class="num">Previous</th>
+        <th class="num">Target</th>
+        <th>Status</th>
+        <th>Checked</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for p in products %}
+      {% set hit = p.target_price and p.current and p.current <= p.target_price %}
+      <tr
+        class="clickable {{ 'row-hit' if hit else '' }}"
+        data-name="{{ p.name | lower }}"
+        data-store="{{ p.store }}"
+        data-hit="{{ 'true' if hit else 'false' }}"
+        data-dropping="{{ 'true' if (p.current and p.previous and p.current < p.previous) else 'false' }}"
+        onclick="location.href='/products/{{ p.id }}'"
+      >
+        <td>
+          <div class="row-title">
+            <div class="tthumb"></div>
+            <div class="tname">{{ p.name }}</div>
+          </div>
+        </td>
+        <td>
+          {% if p.store == 'amazon' %}<span class="pill pill-amz"><span class="dot"></span>Amazon</span>
+          {% elif p.store == 'target' %}<span class="pill pill-tgt"><span class="dot"></span>Target</span>
+          {% elif p.store == 'ebay' %}<span class="pill pill-ebay"><span class="dot"></span>eBay</span>
+          {% else %}<span class="pill"><span class="dot"></span>{{ p.store | title }}</span>{% endif %}
+        </td>
+        <td class="num" style="{{ 'color:var(--hit-2);font-weight:600' if hit else 'font-weight:600' }}">
+          {% if p.current %}${{ '%.2f' | format(p.current) }}{% else %}—{% endif %}
+        </td>
+        <td class="num" style="color:var(--ink-3)">
+          {% if p.previous %}${{ '%.2f' | format(p.previous) }}{% else %}—{% endif %}
+        </td>
+        <td class="num">
+          {% if p.target_price %}${{ '%.2f' | format(p.target_price) }}{% else %}<span style="color:var(--ink-4)">—</span>{% endif %}
+        </td>
+        <td>
+          {% if hit %}
+            <span class="tag-hit">Hit</span>
+          {% elif p.current and p.previous %}
+            {% if p.current < p.previous %}
+              <span class="tag-drop">{{ icon('arrowDown', 11, 2.4) }}{{ ((p.previous - p.current) / p.previous * 100) | round(1) }}%</span>
+            {% elif p.current > p.previous %}
+              <span class="tag-rise">{{ icon('arrowUp', 11, 2.4) }}{{ ((p.current - p.previous) / p.previous * 100) | round(1) }}%</span>
+            {% else %}
+              <span class="tag-flat">No change</span>
+            {% endif %}
+          {% else %}
+            <span class="tag-flat">First check</span>
+          {% endif %}
+        </td>
+        <td style="color:var(--ink-3);font-size:12.5px">
+          {% if p.last_checked %}{{ p.last_checked.strftime('%b %d · %I:%M %p') }}{% else %}Never{% endif %}
+        </td>
+        <td onclick="event.stopPropagation()">
+          <div style="display:flex;gap:4px;justify-content:flex-end">
+            <button class="btn btn-ghost btn-sm btn-icon"
+              onclick="openEditModal({{ p.id }}, {{ p.name | tojson }}, {{ p.target_price or '' }}, {{ p.current or '' }}, {{ p.url | tojson }}, '/')">
+              {{ icon('edit', 14, 2) }}
+            </button>
+            <form method="post" action="/products/{{ p.id }}/delete" onsubmit="return confirm('Stop tracking?')">
+              <button class="btn btn-ghost btn-sm btn-icon">{{ icon('trash', 14, 2) }}</button>
+            </form>
+          </div>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<!-- ─── No results message ────────────────────────────────── -->
+<div class="card" id="no-results" style="padding:40px;text-align:center;color:var(--ink-3);display:none">
+  No products match your filter.
+</div>
+
+{% else %}
+
+<!-- ─── Empty state ───────────────────────────────────────── -->
+<div class="page-head">
+  <div>
+    <h1 class="page-title">Dashboard</h1>
+    <p class="page-sub">Nothing on watch yet — add your first product to start tracking.</p>
+  </div>
+</div>
+<div class="card empty">
+  <div style="width:180px;height:120px;margin:0 auto 20px">
+    <svg viewBox="0 0 180 120" width="180" height="120">
+      <defs>
+        <linearGradient id="eg" x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0%" stop-color="#E6722A" stop-opacity="0.35"/>
+          <stop offset="100%" stop-color="#E6722A" stop-opacity="0"/>
+        </linearGradient>
+      </defs>
+      <path d="M10 90 Q 40 40, 70 70 T 140 40 L 170 25" fill="none" stroke="#E6722A" stroke-width="2.2" stroke-dasharray="3 3"/>
+      <path d="M10 90 Q 40 40, 70 70 T 140 40 L 170 25 L 170 100 L 10 100 Z" fill="url(#eg)"/>
+      <circle cx="70" cy="70" r="5" fill="#2B7A3E" stroke="#FBF7EF" stroke-width="2"/>
+      <circle cx="140" cy="40" r="5" fill="#E6722A" stroke="#FBF7EF" stroke-width="2"/>
+      <text x="148" y="32" font-size="10" font-family="Instrument Serif, serif" fill="#C85A1A" font-weight="600">hit! 🎯</text>
+      <text x="16" y="86" font-size="9" font-family="JetBrains Mono, monospace" fill="#9A8C7E">$219</text>
+      <text x="152" y="52" font-size="9" font-family="JetBrains Mono, monospace" fill="#2B7A3E">$179</text>
+    </svg>
+  </div>
+  <h2 class="empty-title">Nothing on watch yet.</h2>
+  <p class="empty-sub">Paste a product URL from Amazon, Target, or eBay and we'll start tracking the price every morning.</p>
+  <button class="btn btn-hit" onclick="openAddModal()">{{ icon('plus', 16, 2.4) }}Track your first product</button>
+  <div class="empty-examples">
+    <span style="font-size:11.5px;color:var(--ink-4);width:100%;margin-bottom:4px;letter-spacing:0.08em;text-transform:uppercase;font-weight:600">Try one of these</span>
+    <button class="empty-chip" onclick="openAddModal()"><span style="width:6px;height:6px;border-radius:50%;background:var(--amz)"></span>amazon.com/dp/B0…</button>
+    <button class="empty-chip" onclick="openAddModal()"><span style="width:6px;height:6px;border-radius:50%;background:var(--tgt)"></span>target.com/p/…</button>
+    <button class="empty-chip" onclick="openAddModal()"><span style="width:6px;height:6px;border-radius:50%;background:var(--ebay)"></span>ebay.com/itm/…</button>
+  </div>
+</div>
+
+{% endif %}
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+// ─── Layout toggle ────────────────────────────────────────
+let currentFilter = 'all';
+let currentLayout = localStorage.getItem('pm_layout') || 'cards';
+
+function setLayout(l) {
+  currentLayout = l;
+  localStorage.setItem('pm_layout', l);
+  document.getElementById('cards-view').classList.toggle('hidden', l !== 'cards');
+  document.getElementById('table-view').classList.toggle('hidden', l !== 'table');
+  document.getElementById('layout-cards').classList.toggle('active', l === 'cards');
+  document.getElementById('layout-table').classList.toggle('active', l === 'table');
+}
+
+// ─── Filter + search ──────────────────────────────────────
+function filterProducts() {
+  const q = (document.getElementById('search-input')?.value || '').toLowerCase();
+  const cards = document.querySelectorAll('#cards-view .prod');
+  const rows  = document.querySelectorAll('#table-view tbody tr');
+  let visible = 0;
+
+  function matches(el) {
+    const name = el.dataset.name || '';
+    const store = el.dataset.store || '';
+    const hit = el.dataset.hit === 'true';
+    const dropping = el.dataset.dropping === 'true';
+    if (q && !name.includes(q)) return false;
+    if (currentFilter === 'hits' && !hit) return false;
+    if (currentFilter === 'dropping' && !dropping) return false;
+    if (['amazon','target','ebay'].includes(currentFilter) && store !== currentFilter) return false;
+    return true;
+  }
+
+  cards.forEach(el => { const v = matches(el); el.classList.toggle('hidden', !v); if (v) visible++; });
+  rows.forEach(el  => { const v = matches(el); el.classList.toggle('hidden', !v); });
+
+  const noResults = document.getElementById('no-results');
+  if (noResults) noResults.style.display = visible === 0 && currentLayout === 'cards' ? 'block' : 'none';
+}
+
+function setFilter(f, btn) {
+  currentFilter = f;
+  document.querySelectorAll('#filter-seg button').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  filterProducts();
+}
+
+// Init layout on load
+document.addEventListener('DOMContentLoaded', () => setLayout(currentLayout));
+
+// Poll check status and hide banner when done
+{% if checking %}
+(function poll() {
+  fetch('/check/status').then(r => r.json()).then(d => {
+    if (!d.running) {
+      const b = document.getElementById('check-banner');
+      if (b) { b.style.opacity = '0'; b.style.transition = 'opacity .4s'; setTimeout(() => b.remove(), 400); }
+      showToast('All checks complete', 'Prices updated');
+    } else {
+      setTimeout(poll, 1500);
+    }
+  }).catch(() => setTimeout(poll, 3000));
+})();
+{% endif %}
+</script>
+{% endblock %}

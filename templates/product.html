@@ -1,0 +1,366 @@
+{% extends "base.html" %}
+{% block title %}{{ product.name }} — Price Monitor{% endblock %}
+
+{% set active_page = 'dashboard' %}
+
+{% block head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+{% endblock %}
+
+{% block content %}
+
+{% set hit = product.target_price and current and current <= product.target_price %}
+{% set delta = (current - previous) if (current and previous) else none %}
+{% set savings = (previous - current) if (current and previous and previous > current) else none %}
+
+<!-- Breadcrumb -->
+<div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+  <a href="/" class="btn btn-ghost btn-sm">{{ icon('arrowLeft', 14) }}Back</a>
+  <span style="color:var(--ink-4);font-size:13px">
+    / Dashboard /
+    <span style="color:var(--ink-2)">{{ product.name[:50] }}{% if product.name | length > 50 %}…{% endif %}</span>
+  </span>
+</div>
+
+<div class="detail-grid">
+
+  <!-- ─── Main column ─────────────────────────────────────── -->
+  <div>
+
+    <!-- Hero card -->
+    <div class="card detail-hero">
+      <div class="detail-hero-top">
+        <div class="detail-thumb">product<br/>image</div>
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+            {% if product.store == 'amazon' %}<span class="pill pill-amz"><span class="dot"></span>Amazon</span>
+            {% elif product.store == 'target' %}<span class="pill pill-tgt"><span class="dot"></span>Target</span>
+            {% elif product.store == 'ebay' %}<span class="pill pill-ebay"><span class="dot"></span>eBay</span>
+            {% else %}<span class="pill"><span class="dot"></span>{{ product.store | title }}</span>{% endif %}
+            {% if hit %}<span class="tag-hit">Target hit · ${{ '%.2f' | format(current) }}</span>{% endif %}
+          </div>
+          <h1 class="detail-title">{{ product.name }}</h1>
+          <a class="detail-url" href="{{ product.url }}" target="_blank" rel="noreferrer">
+            {{ icon('external', 12, 2) }}
+            {{ product.url | replace('https://', '') | replace('http://', '') }}
+          </a>
+        </div>
+        <!-- Action buttons -->
+        <div style="display:flex;flex-direction:column;gap:6px;flex-shrink:0">
+          <button class="btn {{ 'btn-hit' if hit else 'btn-primary' }}" onclick="checkOne()">
+            {{ icon('refresh', 14, 2.2) }}Check this now
+          </button>
+          <button class="btn btn-sm" onclick="openEditModal(
+            {{ product.id }},
+            {{ product.name | tojson }},
+            {{ product.target_price or '' }},
+            {{ current or '' }},
+            {{ product.url | tojson }},
+            '/products/{{ product.id }}'
+          )">
+            {{ icon('edit', 13, 2) }}Edit
+          </button>
+        </div>
+      </div>
+
+      <!-- Price hero row -->
+      <div class="price-hero">
+        <div>
+          <div class="pk">Current</div>
+          <div class="pv" style="{{ 'color:var(--hit-2)' if hit else '' }}">
+            {% if current %}
+              {% set parts = ('%.2f' | format(current)).split('.') %}
+              ${{ parts[0] }}<span style="font-size:22px;color:var(--ink-3)">.{{ parts[1] }}</span>
+            {% else %}<span style="color:var(--ink-4);font-size:24px">—</span>{% endif %}
+          </div>
+          <div class="ps">
+            {% if delta is not none %}
+              {% if delta < 0 %}<span style="color:var(--drop)">▼ ${{ '%.2f' | format(delta | abs) }} vs. last</span>
+              {% elif delta > 0 %}<span style="color:var(--rise)">▲ ${{ '%.2f' | format(delta) }} vs. last</span>
+              {% else %}no change{% endif %}
+            {% else %}first check{% endif %}
+          </div>
+        </div>
+        <div>
+          <div class="pk">Target</div>
+          {% if product.target_price %}
+            <div class="pv target">
+              {% set parts = ('%.2f' | format(product.target_price)).split('.') %}
+              ${{ parts[0] }}<span style="font-size:22px">.{{ parts[1] }}</span>
+            </div>
+            <div class="ps">
+              {% if hit %}🎯 reached!{% elif current %}${{ '%.2f' | format(current - product.target_price) }} to go{% endif %}
+            </div>
+          {% else %}
+            <div class="pv" style="color:var(--ink-4);font-size:24px">—</div>
+            <div class="ps">not set</div>
+          {% endif %}
+        </div>
+        <div>
+          <div class="pk">All-time low</div>
+          <div class="pv" style="color:var(--drop)">
+            {% if low_price %}
+              {% set parts = ('%.2f' | format(low_price)).split('.') %}
+              ${{ parts[0] }}<span style="font-size:22px">.{{ parts[1] }}</span>
+            {% else %}<span style="color:var(--ink-4);font-size:24px">—</span>{% endif %}
+          </div>
+          <div class="ps">across {{ checks_count }} checks</div>
+        </div>
+        <div>
+          <div class="pk">Change</div>
+          <div class="pv" style="font-size:28px;padding-top:6px">
+            {% if delta is not none and previous %}
+              {% set pct = ((delta / previous) * 100) | round(1) %}
+              {% if delta < 0 %}<span style="color:var(--drop)">▼{{ (pct | abs) }}%</span>
+              {% elif delta > 0 %}<span style="color:var(--rise)">▲{{ pct }}%</span>
+              {% else %}<span style="color:var(--ink-3)">—</span>{% endif %}
+            {% else %}<span style="color:var(--ink-4)">—</span>{% endif %}
+          </div>
+          <div class="ps">vs. previous</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Chart card -->
+    {% if chart_labels %}
+    <div class="card chart-card" style="margin-top:14px">
+      <div class="chart-head">
+        <div class="chart-title">Price history ({{ checks_count }} checks)</div>
+        <div style="display:flex;gap:14px;font-size:11.5px;color:var(--ink-3)">
+          <span><span style="display:inline-block;width:10px;height:2px;background:var(--ink);margin-right:5px;vertical-align:middle"></span>price</span>
+          {% if product.target_price %}
+          <span><span style="display:inline-block;width:10px;height:0;border-top:2px dashed var(--hit);margin-right:5px;vertical-align:middle"></span>target</span>
+          {% endif %}
+        </div>
+      </div>
+      <canvas id="priceChart" height="90"></canvas>
+    </div>
+    {% endif %}
+
+    <!-- History table -->
+    {% if history %}
+    <div class="card" style="margin-top:14px">
+      <div style="padding:16px 20px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--line)">
+        <div>
+          <div style="font-size:14px;font-weight:600">Every check, logged</div>
+          <div style="font-size:12px;color:var(--ink-3);margin-top:2px">{{ checks_count }} checks · one row per sweep</div>
+        </div>
+      </div>
+      <table class="tbl" style="border:0;border-radius:0">
+        <thead>
+          <tr>
+            <th>When</th>
+            <th class="num">Price</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for check in history[:20] %}
+          {% set chk_hit = product.target_price and check.price <= product.target_price %}
+          <tr class="{{ 'row-hit' if chk_hit else '' }}">
+            <td style="font-family:var(--font-mono);font-size:12px;color:var(--ink-3)">
+              {{ check.checked_at | to_et_str }}
+            </td>
+            <td class="num" style="font-weight:600">
+              ${{ '%.2f' | format(check.price) }}
+            </td>
+            <td>
+              {% if chk_hit %}
+                <span class="tag-hit">Hit</span>
+              {% else %}
+                <span style="color:var(--ink-4);font-size:12px;font-family:var(--font-mono)">ok</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- ─── Sidebar ──────────────────────────────────────────── -->
+  <aside>
+
+    <!-- Tracking details -->
+    <div class="card side-card">
+      <h3>Tracking details</h3>
+      <dl class="kv">
+        {% if product.created_at %}
+        <dt>Added</dt><dd>{{ product.created_at.strftime('%b %d, %Y') }}</dd>
+        {% endif %}
+        <dt>Checks</dt><dd>{{ checks_count }}</dd>
+        <dt>Frequency</dt><dd>daily · {{ check_hour }}:00 ET</dd>
+        <dt>Method</dt><dd>{{ 'JSON API' if product.store == 'target' else 'HTML scrape' }}</dd>
+        <dt>Store</dt><dd>{{ product.store | title }}</dd>
+      </dl>
+    </div>
+
+    <!-- Alert target -->
+    {% if product.target_price %}
+    <div class="card side-card" style="margin-top:12px">
+      <h3>Alert when below</h3>
+      <div style="display:flex;align-items:baseline;gap:10px;margin-top:6px">
+        <div style="font-family:var(--font-serif);font-size:32px;letter-spacing:-0.01em;color:{{ 'var(--hit-2)' if hit else 'var(--ink)' }}">
+          ${{ '%.2f' | format(product.target_price) }}
+        </div>
+        {% if hit %}<span class="tag-hit">reached</span>{% endif %}
+      </div>
+      {% if current %}
+      <div style="margin-top:10px;height:8px;background:var(--cream-3);border-radius:999px;overflow:hidden">
+        {% if product.target_price and previous %}
+          {% set span = [previous - product.target_price, 0.01] | max %}
+          {% set remaining = [0, current - product.target_price] | max %}
+          {% set pct = [0, [100, (100 - remaining / span * 100)] | min] | max %}
+        {% else %}
+          {% set pct = 100 if hit else 0 %}
+        {% endif %}
+        <div style="height:100%;width:{{ pct }}%;background:{{ 'var(--hit)' if hit else 'var(--drop)' }};border-radius:999px"></div>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--ink-3);margin-top:6px;font-family:var(--font-mono)">
+        <span>target ${{ '%.2f' | format(product.target_price) }}</span>
+        <span>now ${{ '%.2f' | format(current) }}</span>
+      </div>
+      {% endif %}
+      <button class="btn btn-sm" style="margin-top:12px;width:100%;justify-content:center"
+        onclick="openEditModal({{ product.id }}, {{ product.name | tojson }}, {{ product.target_price or '' }}, {{ current or '' }}, {{ product.url | tojson }}, '/products/{{ product.id }}')">
+        {{ icon('edit', 13, 2) }}Change target
+      </button>
+    </div>
+    {% else %}
+    <div class="card side-card" style="margin-top:12px">
+      <h3>Alert when below</h3>
+      <p style="color:var(--ink-3);font-size:13px;margin:6px 0 12px">No target set for this product.</p>
+      <button class="btn btn-sm btn-hit" style="width:100%;justify-content:center"
+        onclick="openEditModal({{ product.id }}, {{ product.name | tojson }}, '', {{ current or '' }}, {{ product.url | tojson }}, '/products/{{ product.id }}')">
+        {{ icon('target', 13) }}Set a target
+      </button>
+    </div>
+    {% endif %}
+
+    <!-- Notifications -->
+    <div class="card side-card" style="margin-top:12px">
+      <h3>Notifications</h3>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center;font-size:13px">
+          <span style="display:inline-flex;align-items:center;gap:8px">{{ icon('discord', 14) }} Discord</span>
+          <span class="secret-status"><span class="sdot"></span>Active</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;font-size:13px">
+          <span style="display:inline-flex;align-items:center;gap:8px">{{ icon('mail', 14) }} Email</span>
+          <span class="secret-status"><span class="sdot"></span>Active</span>
+        </div>
+        {% if hit %}
+        <div style="font-size:12px;color:var(--hit-2);background:var(--hit-bg);padding:8px 10px;border-radius:8px;font-weight:600">
+          ✨ Target reached — notification sent
+        </div>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- Danger zone -->
+    <form method="post" action="/products/{{ product.id }}/delete"
+      onsubmit="return confirm('Stop tracking this product?')"
+      style="margin-top:12px">
+      <button class="btn btn-sm btn-danger" style="width:100%;justify-content:center">
+        {{ icon('trash', 13, 2) }}Stop tracking
+      </button>
+    </form>
+
+  </aside>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+{% if chart_labels %}
+<script>
+const chartLabels = {{ chart_labels | tojson }};
+const chartPrices = {{ chart_prices | tojson }};
+{% if product.target_price %}
+const targetPrice = {{ product.target_price }};
+{% else %}
+const targetPrice = null;
+{% endif %}
+
+const ctx = document.getElementById('priceChart').getContext('2d');
+const datasets = [
+  {
+    label: 'Price',
+    data: chartPrices,
+    borderColor: 'var(--ink)',
+    backgroundColor: 'rgba(26,22,20,0.05)',
+    borderWidth: 2.2,
+    pointRadius: chartPrices.length > 30 ? 0 : 3,
+    pointHoverRadius: 5,
+    pointBackgroundColor: 'var(--ink)',
+    fill: true,
+    tension: 0.35,
+  }
+];
+
+if (targetPrice !== null) {
+  datasets.push({
+    label: 'Target',
+    data: Array(chartLabels.length).fill(targetPrice),
+    borderColor: 'var(--hit)',
+    borderDash: [4, 4],
+    borderWidth: 1.5,
+    pointRadius: 0,
+    fill: false,
+    tension: 0,
+  });
+}
+
+new Chart(ctx, {
+  type: 'line',
+  data: { labels: chartLabels, datasets },
+  options: {
+    responsive: true,
+    interaction: { mode: 'index', intersect: false },
+    plugins: {
+      legend: { display: false },
+      tooltip: {
+        backgroundColor: 'var(--ink)',
+        titleColor: 'rgba(245,239,228,0.65)',
+        bodyColor: '#fff',
+        titleFont: { family: 'JetBrains Mono', size: 11 },
+        bodyFont: { family: 'Instrument Serif', size: 14 },
+        padding: 10,
+        callbacks: {
+          label: ctx => ctx.dataset.label === 'Target' ? null : ' $' + ctx.parsed.y.toFixed(2),
+          filter: item => item.dataset.label !== 'Target',
+        }
+      }
+    },
+    scales: {
+      y: {
+        ticks: {
+          callback: v => '$' + v.toFixed(0),
+          font: { family: 'JetBrains Mono', size: 10 },
+          color: 'var(--ink-4)',
+        },
+        grid: { color: 'rgba(26,22,20,0.06)' },
+      },
+      x: {
+        ticks: {
+          maxTicksLimit: 8,
+          font: { family: 'JetBrains Mono', size: 10 },
+          color: 'var(--ink-4)',
+        },
+        grid: { display: false },
+      }
+    }
+  }
+});
+</script>
+{% endif %}
+
+<script>
+function checkOne() {
+  showToast('Checking price…', '{{ product.store | title }} · in progress');
+  fetch('/check', { method: 'POST', redirect: 'manual' });
+  setTimeout(() => showToast('Done', 'Price check complete'), 3000);
+}
+</script>
+{% endblock %}
