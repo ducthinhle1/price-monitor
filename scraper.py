@@ -85,6 +85,14 @@ def _get_target_price(url: str) -> float | None:
                      .get("current_retail"))
             if price is not None:
                 return float(price)
+            # Products with variants use current_retail_min
+            price_min = (r.json()
+                         .get("data", {})
+                         .get("product", {})
+                         .get("price", {})
+                         .get("current_retail_min"))
+            if price_min is not None:
+                return float(price_min)
         except Exception as e:
             print(f"  Target API error: {e}")
 
@@ -128,18 +136,39 @@ def _get_target_price(url: str) -> float | None:
     return None
 
 
-def _get_ebay_price(soup: BeautifulSoup) -> float | None:
-    selectors = [
-        ("span", {"class": "x-price-primary"}),
-        ("span", {"itemprop": "price"}),
-        ("div",  {"class": "x-bin-price"}),
-    ]
-    for tag, attrs in selectors:
-        el = soup.find(tag, attrs)
-        if el:
-            price = parse_price(el.get_text())
+def _get_ebay_price_api(item_id: str) -> float | None:
+    """Use eBay Browse API — requires EBAY_APP_ID env var."""
+    import os
+    app_id = os.getenv("EBAY_APP_ID")
+    if not app_id:
+        return None
+    try:
+        r = requests.get(
+            f"https://api.ebay.com/buy/browse/v1/item/v1|{item_id}|0",
+            headers={
+                "Authorization": f"Bearer {app_id}",
+                "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
+                "Content-Type": "application/json",
+            },
+            timeout=15,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            price = data.get("price", {}).get("value")
             if price:
-                return price
+                return float(price)
+    except Exception as e:
+        print(f"  eBay API error: {e}")
+    return None
+
+
+def _get_ebay_price(item_id: str) -> float | None:
+    price = _get_ebay_price_api(item_id)
+    if price is not None:
+        return price
+    # eBay blocks HTML scraping via Akamai bot detection —
+    # set EBAY_APP_ID in your environment to enable price fetching.
+    print("  eBay: no EBAY_APP_ID set, cannot fetch price")
     return None
 
 
@@ -148,6 +177,14 @@ def scrape_price(url: str) -> float | None:
 
     if store == "target":
         return _get_target_price(url)
+
+    if store == "ebay":
+        m = re.search(r"/itm/(?:[^/]+/)?(\d+)", url)
+        item_id = m.group(1) if m else None
+        if not item_id:
+            print("  eBay: could not extract item ID from URL")
+            return None
+        return _get_ebay_price(item_id)
 
     for attempt in range(3):
         try:
@@ -160,13 +197,9 @@ def scrape_price(url: str) -> float | None:
                 continue
 
             soup = BeautifulSoup(response.content, "lxml")
+            price = _get_amazon_price(soup) if store == "amazon" else None
 
-            if store == "amazon":
-                price = _get_amazon_price(soup)
-            elif store == "ebay":
-                price = _get_ebay_price(soup)
-            else:
-                price = None
+            if store == "other":
                 for el in soup.find_all(["span", "div"], class_=lambda c: c and "price" in c.lower()):
                     price = parse_price(el.get_text())
                     if price and 0.5 < price < 100000:
