@@ -61,31 +61,71 @@ def _get_amazon_price(soup: BeautifulSoup) -> float | None:
 
 
 def _get_target_price(url: str) -> float | None:
+    # Try private JSON API first
     match = re.search(r"/-/A-(\d+)", url)
-    if not match:
-        return None
-    tcin = match.group(1)
-    api_url = (
-        f"https://redsky.target.com/redsky_aggregations/v1/web/pdp_client_v1"
-        f"?key=9f36aeafbe60771e321a7cc95a78140772ab3e96"
-        f"&tcin={tcin}&store_id=1000&pricing_store_id=1000"
-    )
+    if match:
+        tcin = match.group(1)
+        api_url = (
+            f"https://redsky.target.com/redsky_aggregations/v1/web/pdp_client_v1"
+            f"?key=9f36aeafbe60771e321a7cc95a78140772ab3e96"
+            f"&tcin={tcin}&store_id=1000&pricing_store_id=1000"
+        )
+        try:
+            r = requests.get(api_url, headers={
+                "User-Agent": HEADERS["User-Agent"],
+                "Accept": "application/json",
+                "Referer": "https://www.target.com/",
+                "Origin": "https://www.target.com",
+            }, timeout=15)
+            r.raise_for_status()
+            price = (r.json()
+                     .get("data", {})
+                     .get("product", {})
+                     .get("price", {})
+                     .get("current_retail"))
+            if price is not None:
+                return float(price)
+        except Exception as e:
+            print(f"  Target API error: {e}")
+
+    # Fallback: scrape HTML product page
+    print("  Falling back to Target HTML scrape…")
     try:
-        r = requests.get(api_url, headers={
-            "User-Agent": HEADERS["User-Agent"],
-            "Accept": "application/json",
-            "Referer": "https://www.target.com/",
-        }, timeout=15)
+        time.sleep(random.uniform(2, 5))
+        r = requests.get(url, headers=HEADERS, timeout=20)
         r.raise_for_status()
-        price = (r.json()
-                 .get("data", {})
-                 .get("product", {})
-                 .get("price", {})
-                 .get("current_retail"))
-        return float(price) if price is not None else None
+        soup = BeautifulSoup(r.content, "lxml")
+
+        # data-test="product-price" span
+        el = soup.find(attrs={"data-test": "product-price"})
+        if el:
+            price = parse_price(el.get_text())
+            if price:
+                return price
+
+        # JSON-LD structured data
+        import json
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                data = json.loads(script.string or "")
+                offers = data.get("offers", {})
+                if isinstance(offers, list):
+                    offers = offers[0]
+                p = offers.get("price")
+                if p:
+                    return float(p)
+            except Exception:
+                pass
+
+        # __TGT_DATA__ embedded JSON
+        tgt_match = re.search(r'"current_retail"\s*:\s*(\d+\.?\d*)', r.text)
+        if tgt_match:
+            return float(tgt_match.group(1))
+
     except Exception as e:
-        print(f"  Target API error: {e}")
-        return None
+        print(f"  Target HTML scrape error: {e}")
+
+    return None
 
 
 def _get_ebay_price(soup: BeautifulSoup) -> float | None:

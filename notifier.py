@@ -35,9 +35,15 @@ def send_discord(webhook_url: str, report: list[dict]):
     for item in report:
         store = _store_label(item["url"])
         change = _change_text(item.get("previous_price"), item["current_price"])
+        hit_line = ""
+        if item.get("hit"):
+            hit_line = f"\n🎯 **Target hit!** (target was ${item['target_price']:.2f})"
+        elif item.get("target_price"):
+            gap = item["current_price"] - item["target_price"]
+            hit_line = f"\n🎯 ${gap:.2f} above target (${item['target_price']:.2f})"
         fields.append({
-            "name": item["name"],
-            "value": f"**${item['current_price']:.2f}** — {change}\n[View on {store}]({item['url']})",
+            "name": ("🎯 " if item.get("hit") else "") + item["name"],
+            "value": f"**${item['current_price']:.2f}** — {change}{hit_line}\n[View on {store}]({item['url']})",
             "inline": False,
         })
 
@@ -76,10 +82,17 @@ def send_email(sender: str, password: str, receiver: str, report: list[dict]):
         else:
             status = '<span style="color:#888;">No change</span>'
 
-        rows += f"""<tr>
+        target_cell = ""
+        if item.get("hit"):
+            target_cell = '<span style="color:#E6722A;font-weight:600">🎯 Target hit!</span>'
+        elif item.get("target_price"):
+            gap = curr - item["target_price"]
+            target_cell = f'<span style="color:#888">${gap:.2f} to go (${item["target_price"]:.2f})</span>'
+        rows += f"""<tr style="{'background:#FBE3CF;' if item.get('hit') else ''}">
             <td style="padding:10px;border-bottom:1px solid #eee;"><b>{escape(item['name'])}</b></td>
             <td style="padding:10px;border-bottom:1px solid #eee;font-size:16px;"><b>${curr:.2f}</b></td>
             <td style="padding:10px;border-bottom:1px solid #eee;">{status}</td>
+            <td style="padding:10px;border-bottom:1px solid #eee;">{target_cell}</td>
             <td style="padding:10px;border-bottom:1px solid #eee;">
                 <a href="{escape(item['url'])}">View on {store}</a>
             </td>
@@ -92,6 +105,7 @@ def send_email(sender: str, password: str, receiver: str, report: list[dict]):
                 <th style="padding:10px;text-align:left;">Product</th>
                 <th style="padding:10px;text-align:left;">Price</th>
                 <th style="padding:10px;text-align:left;">Change</th>
+                <th style="padding:10px;text-align:left;">Target</th>
                 <th style="padding:10px;text-align:left;">Link</th>
             </tr></thead>
             <tbody>{rows}</tbody>

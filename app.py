@@ -123,14 +123,14 @@ def run_all_checks():
                 session.add(PriceCheck(product_id=product.id, price=current_price))
                 session.commit()
 
-                if product.target_price is None or current_price <= product.target_price:
-                    report.append({
-                        "name": product.name,
-                        "url": product.url,
-                        "previous_price": previous_price,
-                        "current_price": current_price,
-                        "target_price": product.target_price,
-                    })
+                report.append({
+                    "name": product.name,
+                    "url": product.url,
+                    "previous_price": previous_price,
+                    "current_price": current_price,
+                    "target_price": product.target_price,
+                    "hit": product.target_price is not None and current_price <= product.target_price,
+                })
                 print(f"  ${current_price:.2f}")
 
             if report:
