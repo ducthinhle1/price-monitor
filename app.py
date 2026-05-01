@@ -4,6 +4,7 @@ from datetime import datetime
 
 import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
+from playwright.sync_api import sync_playwright
 from fastapi import BackgroundTasks, FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
@@ -106,34 +107,82 @@ def run_all_checks():
             password = get_setting(session, "gmail_password")
             receiver = get_setting(session, "receiver_email")
 
-            report = []
-            for product in products:
-                print(f"Checking: {product.name}")
-                current_price = scrape_price(product.url)
-                if current_price is None:
-                    print(f"  Could not retrieve price")
-                    continue
+        # ── Launch one real browser for the whole check run ──────────────────
+        # Think of this like opening Chrome once and visiting each product URL
+        # in a new tab, then closing Chrome when done. Much faster than
+        # launching a new browser for every single product.
+        report = []
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(
+                headless=True,   # no visible window — runs silently in background
+                args=[
+                    "--no-sandbox",                          # required on Linux servers
+                    "--disable-dev-shm-usage",               # prevents memory errors in containers
+                    "--disable-blink-features=AutomationControlled",  # hides robot flag
+                ],
+            )
+            # A "context" is like a fresh browser profile — own cookies, cache, history
+            ctx = browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1280, "height": 720},
+                locale="en-US",
+            )
+            # Remove the navigator.webdriver flag that websites use to detect bots
+            ctx.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+            )
 
-                last = (session.query(PriceCheck)
-                        .filter_by(product_id=product.id)
-                        .order_by(PriceCheck.checked_at.desc())
-                        .first())
-                previous_price = last.price if last else None
+            # Warm up the browser by visiting Amazon's homepage first.
+            # This sets cookies so Amazon treats us like a returning visitor
+            # rather than a first-time bot.
+            warmup = ctx.new_page()
+            try:
+                warmup.goto("https://www.amazon.com", wait_until="domcontentloaded", timeout=15_000)
+            except Exception:
+                pass
+            finally:
+                warmup.close()
 
-                session.add(PriceCheck(product_id=product.id, price=current_price))
-                session.commit()
+            with Session(engine) as session:
+                for product in products:
+                    print(f"Checking: {product.name}")
+                    page = ctx.new_page()   # open a new tab for each product
+                    try:
+                        current_price = scrape_price(product.url, page=page)
+                    finally:
+                        page.close()        # close the tab when done
 
-                report.append({
-                    "name": product.name,
-                    "url": product.url,
-                    "previous_price": previous_price,
-                    "current_price": current_price,
-                    "target_price": product.target_price,
-                    "hit": product.target_price is not None and current_price <= product.target_price,
-                })
-                print(f"  ${current_price:.2f}")
+                    if current_price is None:
+                        print(f"  Could not retrieve price")
+                        continue
 
-            if report:
+                    last = (session.query(PriceCheck)
+                            .filter_by(product_id=product.id)
+                            .order_by(PriceCheck.checked_at.desc())
+                            .first())
+                    previous_price = last.price if last else None
+
+                    session.add(PriceCheck(product_id=product.id, price=current_price))
+                    session.commit()
+
+                    report.append({
+                        "name": product.name,
+                        "url": product.url,
+                        "previous_price": previous_price,
+                        "current_price": current_price,
+                        "target_price": product.target_price,
+                        "hit": product.target_price is not None and current_price <= product.target_price,
+                    })
+                    print(f"  ${current_price:.2f}")
+
+            browser.close()
+
+        if report:
+            with Session(engine) as session:
                 send_discord(discord_webhook, report)
                 send_email(sender, password, receiver, report)
 

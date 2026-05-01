@@ -1,144 +1,88 @@
+import json
+import os
+import random
 import re
 import time
-import random
-import requests
-from bs4 import BeautifulSoup
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-    "Cache-Control": "max-age=0",
-}
+import requests
+
+# ── What is this file? ───────────────────────────────────────────────────────
+# This file's only job: given a product URL, return the current price as a
+# float (e.g. 24.99) or None if we couldn't get it.
+#
+# HOW PRICES ARE FETCHED:
+#   Target  → tries its private JSON API first (fast, no browser needed),
+#              falls back to Playwright browser if that fails
+#   Amazon  → goes straight to Playwright (Amazon blocks plain HTTP requests)
+#   eBay    → tries official Browse API if you have an app key,
+#              falls back to Playwright
+#   Other   → Playwright
 
 
 def detect_store(url: str) -> str:
     if "amazon.com" in url:
         return "amazon"
-    elif "target.com" in url:
+    if "target.com" in url:
         return "target"
-    elif "ebay.com" in url:
+    if "ebay.com" in url:
         return "ebay"
     return "other"
 
 
 def parse_price(text: str) -> float | None:
+    """Pull the first number that looks like a price out of a string."""
     text = text.replace(",", "").strip()
-    match = re.search(r"\d+\.?\d*", text)
+    match = re.search(r"\d+\.\d{2}", text)   # prefer xx.xx format
+    if not match:
+        match = re.search(r"\d+\.?\d*", text)  # fallback: any number
     if match:
         try:
-            return float(match.group())
+            val = float(match.group())
+            # Sanity check: prices should be between $0.01 and $100,000
+            if 0.01 < val < 100_000:
+                return val
         except ValueError:
             pass
     return None
 
 
-def _get_amazon_price(soup: BeautifulSoup) -> float | None:
-    selectors = [
-        ("span", {"class": "a-price-whole"}),
-        ("span", {"id": "priceblock_ourprice"}),
-        ("span", {"id": "priceblock_dealprice"}),
-        ("span", {"class": "a-offscreen"}),
-    ]
-    for tag, attrs in selectors:
-        el = soup.find(tag, attrs)
-        if el:
-            price = parse_price(el.get_text())
-            if price:
-                return price
-    return None
+# ── Target: fast API path ─────────────────────────────────────────────────────
+# Target exposes a private JSON endpoint (redsky.target.com) that returns
+# structured product data — no browser needed, very fast.
+# Works from residential IPs but often blocked on cloud server IPs.
 
-
-def _get_target_price(url: str) -> float | None:
-    # Try private JSON API first
+def _target_api_price(url: str) -> float | None:
     match = re.search(r"/-/A-(\d+)", url)
-    if match:
-        tcin = match.group(1)
-        api_url = (
-            f"https://redsky.target.com/redsky_aggregations/v1/web/pdp_client_v1"
-            f"?key=9f36aeafbe60771e321a7cc95a78140772ab3e96"
-            f"&tcin={tcin}&store_id=1000&pricing_store_id=1000"
-        )
-        try:
-            r = requests.get(api_url, headers={
-                "User-Agent": HEADERS["User-Agent"],
-                "Accept": "application/json",
-                "Referer": "https://www.target.com/",
-                "Origin": "https://www.target.com",
-            }, timeout=15)
-            r.raise_for_status()
-            price = (r.json()
-                     .get("data", {})
-                     .get("product", {})
-                     .get("price", {})
-                     .get("current_retail"))
-            if price is not None:
-                return float(price)
-            # Products with variants use current_retail_min
-            price_min = (r.json()
-                         .get("data", {})
-                         .get("product", {})
-                         .get("price", {})
-                         .get("current_retail_min"))
-            if price_min is not None:
-                return float(price_min)
-        except Exception as e:
-            print(f"  Target API error: {e}")
-
-    # Fallback: scrape HTML product page
-    print("  Falling back to Target HTML scrape…")
+    if not match:
+        return None
+    tcin = match.group(1)
+    api_url = (
+        f"https://redsky.target.com/redsky_aggregations/v1/web/pdp_client_v1"
+        f"?key=9f36aeafbe60771e321a7cc95a78140772ab3e96"
+        f"&tcin={tcin}&store_id=1000&pricing_store_id=1000"
+    )
     try:
-        time.sleep(random.uniform(2, 5))
-        r = requests.get(url, headers=HEADERS, timeout=20)
+        r = requests.get(api_url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json",
+            "Referer": "https://www.target.com/",
+            "Origin": "https://www.target.com",
+        }, timeout=10)
         r.raise_for_status()
-        soup = BeautifulSoup(r.content, "lxml")
-
-        # data-test="product-price" span
-        el = soup.find(attrs={"data-test": "product-price"})
-        if el:
-            price = parse_price(el.get_text())
-            if price:
-                return price
-
-        # JSON-LD structured data
-        import json
-        for script in soup.find_all("script", type="application/ld+json"):
-            try:
-                data = json.loads(script.string or "")
-                offers = data.get("offers", {})
-                if isinstance(offers, list):
-                    offers = offers[0]
-                p = offers.get("price")
-                if p:
-                    return float(p)
-            except Exception:
-                pass
-
-        # __TGT_DATA__ embedded JSON
-        tgt_match = re.search(r'"current_retail"\s*:\s*(\d+\.?\d*)', r.text)
-        if tgt_match:
-            return float(tgt_match.group(1))
-
+        price_obj = r.json().get("data", {}).get("product", {}).get("price", {})
+        # current_retail = single price, current_retail_min = lowest price for variants
+        price = price_obj.get("current_retail") or price_obj.get("current_retail_min")
+        return float(price) if price is not None else None
     except Exception as e:
-        print(f"  Target HTML scrape error: {e}")
+        print(f"  Target API error: {e}")
+        return None
 
-    return None
 
+# ── eBay: official Browse API ─────────────────────────────────────────────────
+# eBay's API is free (5,000 calls/day) but requires registering for an App ID.
+# Set EBAY_APP_ID in your .env or Railway environment variables to enable this.
 
-def _get_ebay_price_api(item_id: str) -> float | None:
-    """Use eBay Browse API — requires EBAY_APP_ID env var."""
-    import os
+def _ebay_api_price(item_id: str) -> float | None:
     app_id = os.getenv("EBAY_APP_ID")
     if not app_id:
         return None
@@ -148,68 +92,132 @@ def _get_ebay_price_api(item_id: str) -> float | None:
             headers={
                 "Authorization": f"Bearer {app_id}",
                 "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
-                "Content-Type": "application/json",
             },
             timeout=15,
         )
         if r.status_code == 200:
-            data = r.json()
-            price = data.get("price", {}).get("value")
-            if price:
-                return float(price)
+            price = r.json().get("price", {}).get("value")
+            return float(price) if price else None
     except Exception as e:
         print(f"  eBay API error: {e}")
     return None
 
 
-def _get_ebay_price(item_id: str) -> float | None:
-    price = _get_ebay_price_api(item_id)
-    if price is not None:
-        return price
-    # eBay blocks HTML scraping via Akamai bot detection —
-    # set EBAY_APP_ID in your environment to enable price fetching.
-    print("  eBay: no EBAY_APP_ID set, cannot fetch price")
+# ── Playwright: real browser scraping ─────────────────────────────────────────
+# A Playwright "page" is a real Chrome tab. We visit the URL just like you
+# would in your browser, wait for the price element to appear, then read it.
+# This bypasses bot detection because it IS a real browser.
+
+def _browser_price(page, url: str, store: str) -> float | None:
+    try:
+        # Visit the page — "domcontentloaded" means we don't wait for every
+        # image/ad to load, just the main HTML and JavaScript
+        page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+
+        # Small random pause — looks more human
+        time.sleep(random.uniform(1.5, 3.0))
+
+        if store == "amazon":
+            # Amazon sometimes shows a "Click to continue shopping" interstitial
+            # before letting you see the product — it's a bot check.
+            # We detect it by looking for a submit button, click it, then proceed.
+            btn = page.query_selector("input[type=submit], button:has-text('Continue')")
+            if btn:
+                print("  Amazon bot check detected — clicking through…")
+                with page.expect_navigation(wait_until="domcontentloaded", timeout=15_000):
+                    btn.click()
+                time.sleep(2)
+
+            # .a-offscreen is Amazon's accessibility price — always present,
+            # contains the full price string like "$24.99"
+            try:
+                page.wait_for_selector(".a-offscreen, .a-price-whole", timeout=12_000)
+            except Exception:
+                pass
+            for sel in [".a-offscreen", ".a-price-whole", "#priceblock_ourprice"]:
+                el = page.query_selector(sel)
+                if el:
+                    price = parse_price(el.inner_text())
+                    if price:
+                        return price
+
+        elif store == "target":
+            try:
+                page.wait_for_selector("[data-test='product-price']", timeout=8_000)
+            except Exception:
+                pass
+            el = page.query_selector("[data-test='product-price']")
+            if el:
+                price = parse_price(el.inner_text())
+                if price:
+                    return price
+
+        elif store == "ebay":
+            try:
+                page.wait_for_selector("[itemprop='price'], .x-price-primary", timeout=8_000)
+            except Exception:
+                pass
+            # itemprop="price" has a content attribute with the raw number — most reliable
+            el = page.query_selector("[itemprop='price']")
+            if el:
+                content = el.get_attribute("content")
+                if content:
+                    try:
+                        return float(content)
+                    except ValueError:
+                        pass
+            el = page.query_selector(".x-price-primary")
+            if el:
+                price = parse_price(el.inner_text())
+                if price:
+                    return price
+
+        else:
+            # Unknown store: look for any element whose CSS class contains "price"
+            for el in page.query_selector_all("[class*='price']"):
+                price = parse_price(el.inner_text())
+                if price:
+                    return price
+
+        print(f"  Price element not found on page")
+
+    except Exception as e:
+        print(f"  Browser error ({store}): {e}")
+
     return None
 
 
-def scrape_price(url: str) -> float | None:
+# ── Main entry point ──────────────────────────────────────────────────────────
+
+def scrape_price(url: str, page=None) -> float | None:
+    """
+    Fetch the current price for a product URL.
+    Pass a Playwright page object for browser-based scraping.
+    """
     store = detect_store(url)
+    print(f"  Store: {store}")
 
+    # Target: try the fast API first
     if store == "target":
-        return _get_target_price(url)
+        price = _target_api_price(url)
+        if price is not None:
+            print(f"  Target API: ${price:.2f}")
+            return price
+        print("  Target API failed — falling back to browser")
 
+    # eBay: try official API if key is configured
     if store == "ebay":
         m = re.search(r"/itm/(?:[^/]+/)?(\d+)", url)
-        item_id = m.group(1) if m else None
-        if not item_id:
-            print("  eBay: could not extract item ID from URL")
-            return None
-        return _get_ebay_price(item_id)
-
-    for attempt in range(3):
-        try:
-            time.sleep(random.uniform(3, 7))
-            response = requests.get(url, headers=HEADERS, timeout=15)
-            response.raise_for_status()
-
-            if store == "amazon" and "api-services-support@amazon.com" in response.text:
-                print(f"  Amazon CAPTCHA (attempt {attempt + 1}/3)")
-                continue
-
-            soup = BeautifulSoup(response.content, "lxml")
-            price = _get_amazon_price(soup) if store == "amazon" else None
-
-            if store == "other":
-                for el in soup.find_all(["span", "div"], class_=lambda c: c and "price" in c.lower()):
-                    price = parse_price(el.get_text())
-                    if price and 0.5 < price < 100000:
-                        break
-
-            if price:
+        if m:
+            price = _ebay_api_price(m.group(1))
+            if price is not None:
+                print(f"  eBay API: ${price:.2f}")
                 return price
-            print(f"  Price not found (attempt {attempt + 1}/3)")
+        print("  eBay API unavailable — falling back to browser")
 
-        except requests.RequestException as e:
-            print(f"  Request failed: {e} (attempt {attempt + 1}/3)")
+    # Everything else (and fallbacks above) uses the browser
+    if page is not None:
+        return _browser_price(page, url, store)
 
+    print(f"  No browser available and API failed for {store}")
     return None
